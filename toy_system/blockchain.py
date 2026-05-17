@@ -1,4 +1,7 @@
-"""Blockchain giocattolo: blocchi concatenati per hash, mempool, validazione round-robin permissioned."""
+"""Simplified blockchain for the project: each block is linked to the
+previous one through its hash, there is a mempool for the pending
+transactions and the validators take turns (round-robin). It's permissioned,
+so not anyone can validate."""
 import time
 import hashlib
 import json
@@ -10,7 +13,7 @@ from typing import Any
 class Block:
     index: int
     timestamp: float
-    payload: dict
+    payload: dict  # the actual data the block carries
     prev_hash: str
     validator: str
     hash: str = ""
@@ -25,7 +28,9 @@ class Block:
 
 
 class Blockchain:
-    """Chain permissioned: solo validatori autorizzati (ospedali, cliniche, ministero) possono validare."""
+    """Permissioned chain. Only the validators I put in the list (hospitals,
+    clinics, ministry) can create blocks: this is to prevent any random node
+    from writing on the chain."""
 
     def __init__(self, name: str, validators: list[str]):
         self.name = name
@@ -33,7 +38,8 @@ class Blockchain:
         self._rr_idx = 0
         self.chain: list[Block] = []
         self.mempool: list[dict] = []
-        # genesi
+        # genesis block: I build it by hand since it has no predecessor,
+        # so prev_hash is all zeros
         gen = Block(0, time.time(), {"genesis": name}, "0" * 64, "system")
         gen.hash = gen.compute_hash()
         self.chain.append(gen)

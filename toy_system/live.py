@@ -1,13 +1,14 @@
-"""Live runner: invece di terminare, il sistema continua a girare e stampa
-un log in streaming di ciò che accade — ingest dei macchinari, mining dei
-blocchi, richieste di accesso dei medici e attacchi simulati.
+"""'Live' version of the demo: the system doesn't stop right away but keeps
+running and prints out everything that happens as it goes (machine ingest,
+mining, doctor accesses and the attacks I simulated). I did it this way to
+see the behaviour over time instead of a single run.
 
-Uso:
-    .venv/bin/python live.py            # ritmo di default
-    .venv/bin/python live.py --fast     # eventi più frequenti
-    .venv/bin/python live.py --seed 7   # deterministico
+To run it:
+    .venv/bin/python live.py            -> normal pace
+    .venv/bin/python live.py --fast     -> more events per second
+    .venv/bin/python live.py --seed 7   -> reproducible run
 
-Ctrl-C per fermare (spegne anche il cloud_server).
+It stops with Ctrl-C (which also shuts down the cloud_server started apart).
 """
 import os
 import sys
@@ -35,7 +36,7 @@ from machine import MedicalMachine
 from doctor import Doctor
 
 
-# ---------------------------------------------------------------- logging ----
+# --- logging ---
 
 _LOG_LOCK = threading.Lock()
 
@@ -46,7 +47,7 @@ def log(tag: str, msg: str) -> None:
         print(f"[{ts}] {tag:8s} {msg}", flush=True)
 
 
-# ------------------------------------------------------------ cloud server ----
+# --- starting the cloud server as a separate process ---
 
 def start_cloud_server() -> subprocess.Popen:
     here = os.path.dirname(os.path.abspath(__file__))
@@ -66,10 +67,12 @@ def start_cloud_server() -> subprocess.Popen:
     return proc
 
 
-# ------------------------------------------------------------------ world ----
+# --- the simulation "world" ---
 
 class World:
-    """Tiene insieme chain, contratti, macchinari, medici e gli URI noti."""
+    """Container class: it puts together the two chains, the contracts, the
+    machines, the doctors and keeps track of the records produced so far.
+    Basically it's the shared state the threads work on."""
 
     def __init__(self) -> None:
         self.chain_lock = threading.Lock()
@@ -82,7 +85,8 @@ class World:
         self.access = AccessLogContract(self.access_chain, self.key_registry)
         self.gateway = Gateway(self.cloud, self.medical, self.key_registry)
 
-        # macchinari registrati on-chain (PKI)
+        # here I register the machines on the chain: their public key ends
+        # up on-chain, it's the system PKI
         self.machines = [
             MedicalMachine("ECG-001", "patient-42"),
             MedicalMachine("SPO2-007", "patient-99"),
@@ -92,20 +96,24 @@ class World:
             self.medical.registerMachine(m.machine_id, m.public_key_bytes())
             log("REGISTER", f"machine {m.machine_id} pubkey on-chain  (patient={m.patient_id})")
 
-        # un medico autorizzato e uno no
+        # I make two doctors on purpose: one with permissions and consent
+        # set up, the other one not, so you see the difference when they try
+        # to access
         self.access.grantAccess("doc-Rossi", "cardiology-read")
         self.access.grantConsent("patient-42", "doc-Rossi")
         self.access.grantConsent("patient-99", "doc-Rossi")
-        log("GRANT", "doc-Rossi -> cardiology-read  + consenso patient-42, patient-99")
+        log("GRANT", "doc-Rossi -> cardiology-read  + consent patient-42, patient-99")
         self.doctors = [
-            Doctor("doc-Rossi", self.access, self.cloud),     # autorizzato
-            Doctor("doc-Mallory", self.access, self.cloud),   # NON autorizzato
+            Doctor("doc-Rossi", self.access, self.cloud),     # this one has the rights
+            Doctor("doc-Mallory", self.access, self.cloud),   # this one is the attacker
         ]
 
-        # URI prodotti finora: (uri, hash, machine_id, signature_hex, patient_id)
+        # I keep the URIs produced so far: for each one I store uri, hash,
+        # machine_id, signature in hex and patient_id, I need them later for
+        # accesses and attacks
         self.records: list[dict] = []
 
-    # ---- azioni del mondo ----
+    # --- the actions that can happen in the simulation ---
 
     def do_ingest(self) -> None:
         m = random.choice(self.machines)
@@ -125,20 +133,21 @@ class World:
             with self.chain_lock:
                 data = doc.fetch(patient, rec["uri"])
         except Exception:
-            # blob manomesso sul cloud: AES-GCM rifiuta la decifratura
-            log("ACCESS", f"{doc.id}  {patient}  {rec['uri']}  -> GRANTED ma blob CORROTTO (AES-GCM tag fail)")
+            # if we end up here it means the blob on the cloud had been
+            # tampered with: AES-GCM notices it from the tag and won't decrypt
+            log("ACCESS", f"{doc.id}  {patient}  {rec['uri']}  -> GRANTED with CORRUPTED blob (AES-GCM tag fail)")
             return
         if data is None:
-            log("ACCESS", f"{doc.id}  {patient}  {rec['uri']}  -> DENIED (loggato on-chain)")
+            log("ACCESS", f"{doc.id}  {patient}  {rec['uri']}  -> DENIED (logged on-chain)")
         else:
-            log("ACCESS", f"{doc.id}  {patient}  {rec['uri']}  -> GRANTED, decifrati {len(data)} sample")
+            log("ACCESS", f"{doc.id}  {patient}  {rec['uri']}  -> GRANTED, decrypted {len(data)} sample")
 
     def do_tamper(self) -> None:
         if not self.records:
             return
         rec = random.choice(self.records)
         with self.chain_lock:
-            self.cloud.tamper(rec["uri"], b"PAYLOAD MALICIOSO " + os.urandom(4).hex().encode())
+            self.cloud.tamper(rec["uri"], b"MALICIOUS PAYLOAD " + os.urandom(4).hex().encode())
             ok = self.medical.verifyIntegrity(rec["hash"], rec["uri"])
         log("ATTACK", f"tamper {rec['uri']}  -> verifyIntegrity={ok}")
 
@@ -156,12 +165,14 @@ class World:
                     machine_id=rec["machine_id"],
                     signature=bytes.fromhex(rec["signature"]),
                 )
-            log("ATTACK", f"replay {rec['uri']}  -> ACCETTATO (BUG!)")
+            log("ATTACK", f"replay {rec['uri']}  -> ACCEPTED (BUG!)")
         except ReplayAttackError:
-            log("ATTACK", f"replay {rec['uri']}  -> rifiutato (anti-replay on-chain)")
+            log("ATTACK", f"replay {rec['uri']}  -> denied (anti-replay on-chain)")
 
     def do_fake_signature(self) -> None:
-        impostor = MedicalMachine("ECG-001", "patient-42")  # stesso id, chiave diversa
+        # same machine_id as a real one but a key generated from scratch:
+        # it's the classic attempt to pass off as a legit machine
+        impostor = MedicalMachine("ECG-001", "patient-42")
         h = os.urandom(8).hex()
         uri = "cloud://medvault/" + os.urandom(6).hex()
         payload = f"{h}|{uri}|patient-42|ECG-001".encode()
@@ -171,9 +182,9 @@ class World:
                     data_hash=h, uri=uri, patient_id="patient-42",
                     machine_id="ECG-001", signature=impostor.sign(payload),
                 )
-            log("ATTACK", "fake-signature ECG-001  -> ACCETTATO (BUG!)")
+            log("ATTACK", "fake-signature ECG-001  -> ACCEPTED (BUG!)")
         except InvalidSignatureError:
-            log("ATTACK", "fake-signature ECG-001  -> rifiutato (firma Ed25519 invalida)")
+            log("ATTACK", "fake-signature ECG-001  -> denied (Ed25519 signature invalid)")
 
     def do_unknown_machine(self) -> None:
         rogue = MedicalMachine("ROGUE-666", "patient-42")
@@ -186,9 +197,9 @@ class World:
                     data_hash=h, uri=uri, patient_id="patient-42",
                     machine_id="ROGUE-666", signature=rogue.sign(payload),
                 )
-            log("ATTACK", "unknown-machine ROGUE-666  -> ACCETTATO (BUG!)")
+            log("ATTACK", "unknown-machine ROGUE-666  -> ACCEPTED (BUG!)")
         except UnknownMachineError:
-            log("ATTACK", "unknown-machine ROGUE-666  -> rifiutato (non in PKI on-chain)")
+            log("ATTACK", "unknown-machine ROGUE-666  -> denied (not in PKI on-chain)") 
 
     def do_status(self) -> None:
         with self.chain_lock:
@@ -199,7 +210,7 @@ class World:
                 f"records={len(self.records)}")
 
 
-# ------------------------------------------------------------ mining loop ----
+# --- thread doing the mining in background ---
 
 def miner_loop(world: World, stop: threading.Event, period: float) -> None:
     while not stop.is_set():
@@ -213,12 +224,12 @@ def miner_loop(world: World, stop: threading.Event, period: float) -> None:
             log("MINED", f"access #{b2.index}  {b2.validator:18s} {b2.payload.get('type','?')}  {b2.hash[:12]}…")
 
 
-# ------------------------------------------------------------------- main ----
+# --- main ---
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fast", action="store_true", help="eventi/blocchi più frequenti")
-    ap.add_argument("--seed", type=int, default=None, help="seed RNG per run deterministico")
+    ap.add_argument("--fast", action="store_true", help="more frequent events/blocks")
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed for a deterministic run")
     args = ap.parse_args()
     if args.seed is not None:
         random.seed(args.seed)
@@ -226,7 +237,8 @@ def main() -> None:
     event_period = (0.4, 1.2) if args.fast else (1.5, 4.0)
     mine_period = 0.7 if args.fast else 2.0
 
-    # SIGTERM -> trattalo come Ctrl-C, così il finally spegne il cloud_server
+    # trick: I turn the SIGTERM into a KeyboardInterrupt so I still go
+    # through the finally block and the cloud_server gets shut down
     def _on_sigterm(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _on_sigterm)
@@ -234,13 +246,14 @@ def main() -> None:
     cloud_proc = start_cloud_server()
     stop = threading.Event()
     try:
-        log("BOOT", "cloud_server :5055 pronto — avvio sistema live")
+        log("BOOT", "cloud_server :5055 ready — starting live system")
         world = World()
 
         miner = threading.Thread(target=miner_loop, args=(world, stop, mine_period), daemon=True)
         miner.start()
 
-        # azioni pesate: l'ingest è il caso normale, gli attacchi sono rari
+        # each action has a weight: ingest is the thing that usually happens,
+        # while I keep the attacks rare so they don't flood the log
         actions = [
             (world.do_ingest,         6),
             (world.do_access,         5),
@@ -252,13 +265,13 @@ def main() -> None:
         ]
         population = [fn for fn, w in actions for _ in range(w)]
 
-        log("READY", "Ctrl-C per fermare\n" + "-" * 78)
+        log("READY", "Ctrl-C to stop\n" + "-" * 78)
         while True:
             random.choice(population)()
             time.sleep(random.uniform(*event_period))
     except KeyboardInterrupt:
         print()
-        log("STOP", "interrotto dall'utente")
+        log("STOP", "interrupted by user")
     finally:
         stop.set()
         cloud_proc.send_signal(signal.SIGTERM)

@@ -75,14 +75,14 @@ def main() -> None:
         gateway = Gateway(cloud, medical_contract, key_registry)
 
         # ---- registrazione macchinario nella PKI on-chain ----
-        banner("0) Registrazione macchinario (pubkey Ed25519) on-chain")
+        banner("0) Machine registration (Ed25519 pubkey) on-chain")
         machine = MedicalMachine("ECG-001", "patient-42")
         medical_contract.registerMachine(machine.machine_id, machine.public_key_bytes())
         data_chain.mine_all()
-        print(f"  pubkey registrata per {machine.machine_id}")
+        print(f"  pubkey registered for {machine.machine_id}")
 
         # ---- 1) ingestione ----
-        banner("1) Ingest: macchinario firma -> gateway cifra -> cloud HTTP -> on-chain")
+        banner("1) Ingest: machine signs -> gateway encrypts -> cloud HTTP -> on-chain")
         rec = gateway.ingest(machine, n_samples=3)
         print(f"  hash={rec['hash'][:16]}…  uri={rec['uri']}")
         print(f"  signature={rec['signature'][:32]}…")
@@ -96,26 +96,26 @@ def main() -> None:
         access_chain.mine_all()
 
         # ---- 3) accesso autorizzato ----
-        banner("3) Medico autorizzato -> requestAccess -> decifra blob HTTP")
+        banner("3) Authorized doctor -> requestAccess -> decrypts HTTP blob")
         doc_ok = Doctor("doc-Rossi", access_contract, cloud)
         data = doc_ok.fetch("patient-42", rec["uri"])
-        print(f"  Dati decifrati ({len(data)} sample): {data[0]}")
+        print(f"  Decrypted data ({len(data)} samples): {data[0]}")
         access_chain.mine_all()
 
         # ---- 4) accesso negato ----
-        banner("4) Medico non autorizzato -> negato (loggato comunque)")
+        banner("4) Unauthorized doctor -> denied (logged anyway)")
         doc_evil = Doctor("doc-Mallory", access_contract, cloud)
-        print(f"  Risultato: {doc_evil.fetch('patient-42', rec['uri'])}")
+        print(f"  Result: {doc_evil.fetch('patient-42', rec['uri'])}")
         access_chain.mine_all()
 
         # ---- 5) integrità ----
-        banner("5) verifyIntegrity OK -> tampering HTTP -> rilevato")
-        print(f"  Integrità pre-tamper: {medical_contract.verifyIntegrity(rec['hash'], rec['uri'])}")
-        cloud.tamper(rec["uri"], b"PAYLOAD MALICIOSO VIA HTTP PUT")
-        print(f"  Integrità post-tamper: {medical_contract.verifyIntegrity(rec['hash'], rec['uri'])}")
+        banner("5) verifyIntegrity OK -> HTTP tampering -> detected")
+        print(f"  Integrity pre-tamper: {medical_contract.verifyIntegrity(rec['hash'], rec['uri'])}")
+        cloud.tamper(rec["uri"], b"MALICIOUS PAYLOAD VIA HTTP PUT")
+        print(f"  Integrity post-tamper: {medical_contract.verifyIntegrity(rec['hash'], rec['uri'])}")
 
         # ---- 6) anti-replay: rinviamo stessa (hash, uri) ----
-        banner("6) Anti-replay: rinvio dello stesso record")
+        banner("6) Anti-replay: resending the same record")
         try:
             medical_contract.registerData(
                 data_hash=rec["hash"],
@@ -124,12 +124,12 @@ def main() -> None:
                 machine_id="ECG-001",
                 signature=bytes.fromhex(rec["signature"]),
             )
-            print("  ERRORE: replay accettato!")
+            print("  ERROR: replay accepted!")
         except ReplayAttackError as e:
-            print(f"  Replay rifiutato come atteso: {e}")
+            print(f"  Replay rejected as expected: {e}")
 
         # ---- 7) firma invalida: macchinario impersonato ----
-        banner("7) Firma invalida: attaccante prova a registrare dato spoofato")
+        banner("7) Invalid signature: attacker tries to register spoofed data")
         fake_machine = MedicalMachine("ECG-001", "patient-42")  # stesso id, KEY DIVERSA
         # firma con la chiave SBAGLIATA (quella nuova, non quella registrata)
         fake_payload = b"deadbeef|cloud://medvault/fakefakefake|patient-42|ECG-001"
@@ -142,16 +142,16 @@ def main() -> None:
                 machine_id="ECG-001",
                 signature=bad_sig,
             )
-            print("  ERRORE: firma invalida accettata!")
+            print("  ERROR: invalid signature accepted!")
         except InvalidSignatureError as e:
-            print(f"  Firma rifiutata come atteso: {e}")
+            print(f"  Signature rejected as expected: {e}")
 
         # ---- 8) chain integrity ----
-        banner("8) Verifica concatenazione hash blocchi")
-        print(f"  data-chain valida?   {data_chain.verify_chain()}")
-        print(f"  access-chain valida? {access_chain.verify_chain()}")
+        banner("8) Verify block hash chaining")
+        print(f"  data-chain valid?   {data_chain.verify_chain()}")
+        print(f"  access-chain valid? {access_chain.verify_chain()}")
 
-        banner("DEMO ESTESA COMPLETATA")
+        banner("EXTENDED DEMO COMPLETED")
     finally:
         cloud_proc.send_signal(signal.SIGTERM)
         cloud_proc.wait(timeout=3)
